@@ -776,12 +776,37 @@ static int32_t taosDropStb(TAOS* taos, void* meta, int32_t metaLen) {
     goto end;
   }
 
+  SCatalog*      pCatalog = NULL;
+  code = catalogGetHandle(pRequest->pTscObj->pAppInfo->clusterId, &pCatalog);
+  if (code != TSDB_CODE_SUCCESS) {
+    goto end;
+  }
+  SRequestConnInfo conn = {.pTrans = pRequest->pTscObj->pAppInfo->pTransporter,
+      .requestId = pRequest->requestId,
+      .requestObjRefId = pRequest->self,
+      .mgmtEps = getEpSet_s(&pRequest->pTscObj->pAppInfo->mgmtEp)};
+  SName       pName = {0};
+  toName(pRequest->pTscObj->acctId, pRequest->pDb, req.name, &pName);
+  STableMeta *pTableMeta = NULL;
+  code = catalogGetTableMeta(pCatalog, &conn, &pName, &pTableMeta);
+  if (code == TSDB_CODE_PAR_TABLE_NOT_EXIST){
+    code = TSDB_CODE_SUCCESS;
+    taosMemoryFreeClear(pTableMeta);
+    goto end;
+  }
+  if (code != TSDB_CODE_SUCCESS) {
+    uError("taosCreateTable:catalogGetTableMeta failed. table name: %s", req.name);
+    goto end;
+  }
+  pReq.suid = pTableMeta->uid;
+  taosMemoryFreeClear(pTableMeta);
+
   // build drop stable
   pReq.igNotExists = true;
   pReq.source = TD_REQ_FROM_TAOX;
-  pReq.suid = processSuid(req.suid, pRequest->pDb);
+//  pReq.suid = processSuid(req.suid, pRequest->pDb);
 
-  uDebug("taosDropStb name:%s suid:%"PRId64" processSuid:%"PRId64, req.name, req.suid, pReq.suid);
+  uDebug("taosDropStb name:%s suid:%"PRId64" new suid:%"PRId64, req.name, req.suid, pReq.suid);
   STscObj* pTscObj = pRequest->pTscObj;
   SName    tableName = {0};
   tNameExtractFullName(toName(pTscObj->acctId, pRequest->pDb, req.name, &tableName), pReq.name);
@@ -806,7 +831,7 @@ static int32_t taosDropStb(TAOS* taos, void* meta, int32_t metaLen) {
   launchQueryImpl(pRequest, &pQuery, true, NULL);
 
   if (pRequest->code == TSDB_CODE_SUCCESS) {
-    SCatalog* pCatalog = NULL;
+//    SCatalog* pCatalog = NULL;
     catalogGetHandle(pTscObj->pAppInfo->clusterId, &pCatalog);
     catalogRemoveTableMeta(pCatalog, &tableName);
   }
@@ -900,15 +925,15 @@ static int32_t taosCreateTable(TAOS* taos, void* meta, int32_t metaLen) {
       STableMeta* pTableMeta = NULL;
       SName       sName = {0};
       tb_uid_t oldSuid = pCreateReq->ctb.suid;
-      pCreateReq->ctb.suid = processSuid(pCreateReq->ctb.suid, pRequest->pDb);
-      uDebug("taosCreateTable name:%s sname:%s suid:%"PRId64" processSuid:%"PRId64, pCreateReq->name, pCreateReq->ctb.stbName, pCreateReq->ctb.suid, oldSuid);
-
+//      pCreateReq->ctb.suid = processSuid(pCreateReq->ctb.suid, pRequest->pDb);
       toName(pTscObj->acctId, pRequest->pDb, pCreateReq->ctb.stbName, &sName);
       code = catalogGetTableMeta(pCatalog, &conn, &sName, &pTableMeta);
       if (code != TSDB_CODE_SUCCESS) {
         uError("taosCreateTable:catalogGetTableMeta failed. table name: %s", pCreateReq->ctb.stbName);
         goto end;
       }
+      pCreateReq->ctb.suid = pTableMeta->uid;
+      uDebug("taosCreateTable name:%s sname:%s suid:%"PRId64" new suid:%"PRId64, pCreateReq->name, pCreateReq->ctb.stbName, oldSuid, pCreateReq->ctb.suid);
 
       for (int32_t i = 0; i < taosArrayGetSize(pCreateReq->ctb.tagName); i++) {
         char* tName = taosArrayGet(pCreateReq->ctb.tagName, i);
@@ -1041,8 +1066,7 @@ static int32_t taosDropTable(TAOS* taos, void* meta, int32_t metaLen) {
   for (int32_t iReq = 0; iReq < req.nReqs; iReq++) {
     pDropReq = req.pReqs + iReq;
     pDropReq->igNotExists = true;
-    pDropReq->suid = processSuid(pDropReq->suid, pRequest->pDb);
-    uDebug("taosDropTable name:%s suid:%"PRId64" processSuid:%"PRId64, pDropReq->name, pDropReq->suid, pDropReq->suid);
+//    pDropReq->suid = processSuid(pDropReq->suid, pRequest->pDb);
 
     SVgroupInfo pInfo = {0};
     SName       pName = {0};
@@ -1051,6 +1075,22 @@ static int32_t taosDropTable(TAOS* taos, void* meta, int32_t metaLen) {
     if (code != TSDB_CODE_SUCCESS) {
       goto end;
     }
+
+    STableMeta *pTableMeta = NULL;
+    code = catalogGetTableMeta(pCatalog, &conn, &pName, &pTableMeta);
+    if (code == TSDB_CODE_PAR_TABLE_NOT_EXIST){
+      code = TSDB_CODE_SUCCESS;
+      taosMemoryFreeClear(pTableMeta);
+      continue;
+    }
+    if (code != TSDB_CODE_SUCCESS) {
+      uError("taosDropTable:catalogGetTableMeta failed. table name: %s", pDropReq->name);
+      goto end;
+    }
+    tb_uid_t oldSuid = pDropReq->suid;
+    pDropReq->suid = pTableMeta->suid;
+    taosMemoryFreeClear(pTableMeta);
+    uDebug("taosDropTable name:%s suid:%"PRId64" new suid:%"PRId64, pDropReq->name, oldSuid, pDropReq->suid);
 
     taosArrayPush(pRequest->tableList, &pName);
     SVgroupDropTableBatch* pTableBatch = taosHashGet(pVgroupHashmap, &pInfo.vgId, sizeof(pInfo.vgId));
@@ -1066,6 +1106,9 @@ static int32_t taosDropTable(TAOS* taos, void* meta, int32_t metaLen) {
     }
   }
 
+  if (taosHashGetSize(pVgroupHashmap) == 0){
+    goto end;
+  }
   SArray* pBufArray = serializeVgroupsDropTableBatch(pVgroupHashmap);
   if (NULL == pBufArray) {
     code = TSDB_CODE_OUT_OF_MEMORY;
@@ -1330,6 +1373,8 @@ int taos_write_raw_block_with_fields(TAOS* taos, int rows, char* pData, const ch
     uError("WriteRaw:catalogGetTableMeta failed. table name: %s", tbname);
     goto end;
   }
+//  uError("td23101 0vgId:%d, vgId:%d, name:%s, uid:%"PRIu64, vgData.vgId, pTableMeta->vgId, tbname, pTableMeta->uid);
+
   pQuery = smlInitHandle();
   if (pQuery == NULL) {
     code = TSDB_CODE_OUT_OF_MEMORY;
@@ -1337,6 +1382,7 @@ int taos_write_raw_block_with_fields(TAOS* taos, int rows, char* pData, const ch
   }
   pVgHash = taosHashInit(16, taosGetDefaultHashFunction(TSDB_DATA_TYPE_INT), true, HASH_NO_LOCK);
   taosHashPut(pVgHash, (const char*)&vgData.vgId, sizeof(vgData.vgId), (char*)&vgData, sizeof(vgData));
+//  uError("td23101 1vgId:%d, numEps:%d, name:%s, uid:%"PRIu64, vgData.vgId, vgData.epSet.numOfEps, tbname, pTableMeta->uid);
 
   code = rawBlockBindData(pQuery, pTableMeta, pData, NULL, fields, numFields, false);
   if (code != TSDB_CODE_SUCCESS) {
@@ -1673,17 +1719,22 @@ static int32_t tmqWriteRawMetaDataImpl(TAOS* taos, void* data, int32_t dataLen) 
       }
       if (strcmp(tbName, pCreateReq.name) == 0) {
         cloneSVreateTbReq(&pCreateReq, &pCreateReqDst);
-        pCreateReqDst->ctb.suid = processSuid(pCreateReqDst->ctb.suid, pRequest->pDb);
+//        pCreateReqDst->ctb.suid = processSuid(pCreateReqDst->ctb.suid, pRequest->pDb);
         tDecoderClear(&decoderTmp);
         break;
       }
       tDecoderClear(&decoderTmp);
     }
 
-    if (pCreateReqDst) {
+    SVgroupInfo vg;
+    code = catalogGetTableHashVgroup(pCatalog, &conn, &pName, &vg);
+    if (code != TSDB_CODE_SUCCESS) {
+      uError("WriteRaw:catalogGetTableHashVgroup failed. table name: %s", tbName);
+      goto end;
+    }
+
+    if (pCreateReqDst) {  // change stable name to get meta
       strcpy(pName.tname, pCreateReqDst->ctb.stbName);
-    } else {
-      strcpy(pName.tname, tbName);
     }
     code = catalogGetTableMeta(pCatalog, &conn, &pName, &pTableMeta);
     if (code == TSDB_CODE_PAR_TABLE_NOT_EXIST) {
@@ -1696,16 +1747,10 @@ static int32_t tmqWriteRawMetaDataImpl(TAOS* taos, void* data, int32_t dataLen) 
       goto end;
     }
 
-    SVgroupInfo vg;
-    code = catalogGetTableHashVgroup(pCatalog, &conn, &pName, &vg);
-    if (code != TSDB_CODE_SUCCESS) {
-      uError("WriteRaw:catalogGetTableHashVgroup failed. table name: %s", tbName);
-      goto end;
-    }
-
     if (pCreateReqDst) {
       pTableMeta->vgId = vg.vgId;
       pTableMeta->uid = pCreateReqDst->uid;
+      pCreateReqDst->ctb.suid = pTableMeta->suid;
     }
     void* hData = taosHashGet(pVgHash, &vg.vgId, sizeof(vg.vgId));
     if (hData == NULL) {
