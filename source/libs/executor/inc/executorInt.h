@@ -446,6 +446,8 @@ typedef struct SStreamIntervalOperatorInfo {
   SArray*            pUpdated;
   SSHashObj*         pUpdatedMap;
   int64_t            dataVersion;
+  SWinKey            preWinKey;
+  SRowBuffPos*       preWinPos;
 } SStreamIntervalOperatorInfo;
 
 typedef struct SDataGroupInfo {

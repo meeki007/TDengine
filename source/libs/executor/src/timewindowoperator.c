@@ -2050,11 +2050,15 @@ bool hasIntervalWindow(SStreamState* pState, SWinKey* pKey) { return streamState
 
 int32_t setIntervalOutputBuf(SStreamState* pState, STimeWindow* win, SRowBuffPos** pResult, int64_t groupId,
                              SqlFunctionCtx* pCtx, int32_t numOfOutput, int32_t* rowEntryInfoOffset,
-                             SAggSupporter* pAggSup) {
+                             SAggSupporter* pAggSup, SWinKey* preWin, SRowBuffPos* preWinPos) {
   SWinKey key = {
       .ts = win->skey,
       .groupId = groupId,
   };
+  if (winKeyCmprImpl(&key, preWin) == 0) {
+    *pResult = preWinPos;
+    return TSDB_CODE_SUCCESS;
+  }
   char*   value = NULL;
   int32_t size = pAggSup->resultRowSize;
 
@@ -2104,6 +2108,9 @@ static void clearStreamIntervalOperator(SStreamIntervalOperatorInfo* pInfo) {
   initResultRowInfo(&pInfo->binfo.resultRowInfo);
   pInfo->aggSup.currentPageId = -1;
   streamStateClear(pInfo->pState);
+  pInfo->preWinKey.groupId = 0;
+  pInfo->preWinKey.ts = INT64_MIN;
+  pInfo->preWinPos = NULL;
 }
 
 static void clearSpecialDataBlock(SSDataBlock* pBlock) {
@@ -2324,7 +2331,6 @@ static void doStreamIntervalAggImpl(SOperatorInfo* pOperatorInfo, SSDataBlock* p
   int32_t         step = 1;
   TSKEY*          tsCols = NULL;
   SRowBuffPos*    pResPos = NULL;
-  SResultRow*     pResult = NULL;
   int32_t         forwardRows = 0;
 
   SColumnInfoData* pColDataInfo = taosArrayGet(pSDataBlock->pDataBlock, pInfo->primaryTsIndex);
@@ -2386,11 +2392,8 @@ static void doStreamIntervalAggImpl(SOperatorInfo* pOperatorInfo, SSDataBlock* p
     }
 
     int32_t code = setIntervalOutputBuf(pInfo->pState, &nextWin, &pResPos, groupId, pSup->pCtx, numOfOutput,
-                                        pSup->rowEntryInfoOffset, &pInfo->aggSup);
-    pResult = (SResultRow*)pResPos->pRowBuff;
-    if (code != TSDB_CODE_SUCCESS || pResult == NULL) {
-      T_LONG_JMP(pTaskInfo->env, TSDB_CODE_OUT_OF_MEMORY);
-    }
+                                        pSup->rowEntryInfoOffset, &pInfo->aggSup, &pInfo->preWinKey, pInfo->preWinPos);
+    pInfo->preWinPos = pResPos;
     if (IS_FINAL_OP(pInfo)) {
       forwardRows = 1;
     } else {
@@ -2399,7 +2402,7 @@ static void doStreamIntervalAggImpl(SOperatorInfo* pOperatorInfo, SSDataBlock* p
     }
 
     SWinKey key = {
-        .ts = pResult->win.skey,
+        .ts = nextWin.skey,
         .groupId = groupId,
     };
     if (pInfo->twAggSup.calTrigger == STREAM_TRIGGER_AT_ONCE && pUpdatedMap) {
@@ -2770,6 +2773,9 @@ SOperatorInfo* createStreamFinalIntervalOperatorInfo(SOperatorInfo* downstream, 
   pInfo->pState->pFileState = streamFileStateInit(tsStreamBufferSize, sizeof(SWinKey), pInfo->aggSup.resultRowSize,
                                                   compareTs, pInfo->pState, pInfo->twAggSup.deleteMark);
   pInfo->dataVersion = 0;
+  pInfo->preWinKey.groupId = 0;
+  pInfo->preWinKey.ts = INT64_MIN;
+  pInfo->preWinPos = NULL;
 
   pOperator->operatorType = pPhyNode->type;
   pOperator->blocking = true;
@@ -4927,6 +4933,9 @@ SOperatorInfo* createStreamIntervalOperatorInfo(SOperatorInfo* downstream, SPhys
   pInfo->pUpdatedMap = NULL;
   pInfo->pState->pFileState = streamFileStateInit(tsStreamBufferSize, sizeof(SWinKey), pInfo->aggSup.resultRowSize,
                                                   compareTs, pInfo->pState, pInfo->twAggSup.deleteMark);
+  pInfo->preWinKey.groupId = 0;
+  pInfo->preWinKey.ts = INT64_MIN;
+  pInfo->preWinPos = NULL;
 
   setOperatorInfo(pOperator, "StreamIntervalOperator", QUERY_NODE_PHYSICAL_PLAN_STREAM_INTERVAL, true, OP_NOT_OPENED,
                   pInfo, pTaskInfo);
